@@ -9,7 +9,7 @@ import numpy as np
 import torch
 import random
 import itertools
-from typing import Optional, Callable, List, Tuple, Any
+from typing import Optional, Callable, List, Tuple, Any, Dict
 from settings import *
 from utils.preprocess import *
 from utils.data_util import load_dataset
@@ -503,3 +503,161 @@ class TAGDataset(torch.utils.data.Dataset):  # Map style
 
     def __len__(self):
         return self.data.n_nodes
+
+class TextAttributedGraphDataset(torch.utils.data.Dataset):
+    """Dataset for text-attributed graphs"""
+    def __init__(
+        self,
+        split: str,
+        data_dir: str = "data",
+        max_length: int = 512,
+        mask_rate: float = 0.15
+    ):
+        self.split = split
+        self.data_dir = data_dir
+        self.max_length = max_length
+        self.mask_rate = mask_rate
+        
+        # Load tokenizer
+        self.tokenizer = AutoTokenizer.from_pretrained("microsoft/deberta-base")
+        
+        # Load graph data
+        self.graph = self._load_graph()
+        self.node_texts = self._load_node_texts()
+        self.edge_texts = self._load_edge_texts() if os.path.exists(os.path.join(data_dir, "edge_texts.txt")) else None
+        
+        # Load labels if available
+        self.labels = self._load_labels() if os.path.exists(os.path.join(data_dir, f"{split}_labels.txt")) else None
+        
+        # Load instructions for instruction tuning
+        self.instructions = self._load_instructions() if os.path.exists(os.path.join(data_dir, "instructions.txt")) else None
+        
+    def _load_graph(self) -> dgl.DGLGraph:
+        """Load graph structure"""
+        # Load edge list
+        edge_list = np.loadtxt(os.path.join(self.data_dir, "edge_list.txt"), dtype=int)
+        src, dst = edge_list[:, 0], edge_list[:, 1]
+        
+        # Create graph
+        graph = dgl.graph((src, dst))
+        return graph
+        
+    def _load_node_texts(self) -> List[str]:
+        """Load node text features"""
+        with open(os.path.join(self.data_dir, "node_texts.txt"), "r") as f:
+            texts = [line.strip() for line in f]
+        return texts
+        
+    def _load_edge_texts(self) -> List[str]:
+        """Load edge text features"""
+        with open(os.path.join(self.data_dir, "edge_texts.txt"), "r") as f:
+            texts = [line.strip() for line in f]
+        return texts
+        
+    def _load_labels(self) -> torch.Tensor:
+        """Load node/edge/graph labels"""
+        labels = np.loadtxt(os.path.join(self.data_dir, f"{self.split}_labels.txt"), dtype=int)
+        return torch.tensor(labels)
+        
+    def _load_instructions(self) -> List[Dict[str, Any]]:
+        """Load instructions for different tasks"""
+        instructions = []
+        with open(os.path.join(self.data_dir, "instructions.txt"), "r") as f:
+            for line in f:
+                task_type, instruction = line.strip().split("\t")
+                instructions.append({
+                    "task_type": task_type,
+                    "instruction": instruction
+                })
+        return instructions
+        
+    def _tokenize_text(self, text: str) -> Dict[str, torch.Tensor]:
+        """Tokenize text with masking for MLM"""
+        # Add [CLS] and [SEP] tokens
+        text = f"[CLS] {text} [SEP]"
+        
+        # Tokenize
+        tokenized = self.tokenizer(
+            text,
+            max_length=self.max_length,
+            padding="max_length",
+            truncation=True,
+            return_tensors="pt"
+        )
+        
+        # Create masked version for MLM
+        input_ids = tokenized["input_ids"].clone()
+        attention_mask = tokenized["attention_mask"]
+        token_type_ids = tokenized["token_type_ids"]
+        
+        # Randomly mask tokens
+        mask_indices = torch.rand(input_ids.shape) < self.mask_rate
+        mask_indices = mask_indices & (input_ids != self.tokenizer.cls_token_id) & (input_ids != self.tokenizer.sep_token_id)
+        masked_input_ids = input_ids.clone()
+        masked_input_ids[mask_indices] = self.tokenizer.mask_token_id
+        
+        return {
+            "input_ids": input_ids.squeeze(0),
+            "masked_input_ids": masked_input_ids.squeeze(0),
+            "attention_mask": attention_mask.squeeze(0),
+            "token_type_ids": token_type_ids.squeeze(0)
+        }
+        
+    def __len__(self) -> int:
+        return len(self.node_texts)
+        
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        # Get node text and tokenize
+        node_text = self.node_texts[idx]
+        tokenized = self._tokenize_text(node_text)
+        
+        # Get subgraph for this node
+        subgraph = dgl.node_subgraph(self.graph, [idx])
+        
+        # Prepare output
+        output = {
+            "graph": subgraph,
+            **tokenized
+        }
+        
+        # Add labels if available
+        if self.labels is not None:
+            output["label"] = self.labels[idx]
+            
+        # Add instruction if available
+        if self.instructions is not None:
+            instruction = self.instructions[idx % len(self.instructions)]
+            output.update(instruction)
+            
+        return output
+
+def collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Collate function for DataLoader"""
+    # Stack tokenized inputs
+    tokenized = {
+        "input_ids": torch.stack([item["input_ids"] for item in batch]),
+        "masked_input_ids": torch.stack([item["masked_input_ids"] for item in batch]),
+        "attention_mask": torch.stack([item["attention_mask"] for item in batch]),
+        "token_type_ids": torch.stack([item["token_type_ids"] for item in batch])
+    }
+    
+    # Combine graphs
+    graphs = [item["graph"] for item in batch]
+    batched_graph = dgl.batch(graphs)
+    
+    # Prepare output
+    output = {
+        "graph": batched_graph,
+        **tokenized
+    }
+    
+    # Add labels if available
+    if "label" in batch[0]:
+        output["label"] = torch.stack([item["label"] for item in batch])
+        
+    # Add instruction if available
+    if "instruction" in batch[0]:
+        output["instruction"] = [item["instruction"] for item in batch]
+        output["task_type"] = [item["task_type"] for item in batch]
+        
+    return output

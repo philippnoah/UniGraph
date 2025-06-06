@@ -5,6 +5,8 @@ import torch
 import logging
 import os
 import scipy.sparse as sp
+import torch.nn.functional as F
+from typing import Tuple, List, Optional
 
 import dgl
 from dgl.data import load_data, CoraGraphDataset, CiteseerGraphDataset, PubmedGraphDataset
@@ -206,6 +208,83 @@ def load_dataset(dataset_name):
 
     return feats, graph, label, split_idx
 
+class PPRSampler:
+    def __init__(self, alpha: float = 0.15, top_k: int = 32):
+        """
+        Initialize PPR-based subgraph sampler
+        
+        Args:
+            alpha: Teleport probability in PPR
+            top_k: Number of nodes to sample for each anchor node
+        """
+        self.alpha = alpha
+        self.top_k = top_k
+        
+    def compute_ppr(self, adj_matrix: torch.Tensor, anchor_nodes: torch.Tensor) -> torch.Tensor:
+        """
+        Compute Personalized PageRank scores for anchor nodes
+        
+        Args:
+            adj_matrix: Adjacency matrix of the graph
+            anchor_nodes: Indices of anchor nodes
+            
+        Returns:
+            PPR scores for each node with respect to anchor nodes
+        """
+        n = adj_matrix.size(0)
+        # Normalize adjacency matrix
+        deg = adj_matrix.sum(dim=1)
+        deg_inv_sqrt = torch.pow(deg, -0.5)
+        deg_inv_sqrt[deg_inv_sqrt == float('inf')] = 0
+        normalized_adj = adj_matrix * deg_inv_sqrt.unsqueeze(1) * deg_inv_sqrt.unsqueeze(0)
+        
+        # Initialize PPR scores
+        ppr_scores = torch.zeros(n, device=adj_matrix.device)
+        ppr_scores[anchor_nodes] = 1.0 / len(anchor_nodes)
+        
+        # Power iteration
+        for _ in range(50):  # Fixed number of iterations
+            ppr_scores = (1 - self.alpha) * normalized_adj @ ppr_scores + self.alpha * ppr_scores
+            
+        return ppr_scores
+    
+    def sample_subgraph(self, graph, anchor_nodes: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Sample subgraph using PPR scores
+        
+        Args:
+            graph: Input graph
+            anchor_nodes: Indices of anchor nodes
+            
+        Returns:
+            Tuple of (sampled node indices, sampled edge indices)
+        """
+        adj_matrix = graph.adj()
+        ppr_scores = self.compute_ppr(adj_matrix, anchor_nodes)
+        
+        # Get top-k nodes based on PPR scores
+        _, top_k_indices = torch.topk(ppr_scores, self.top_k)
+        sampled_nodes = torch.cat([anchor_nodes, top_k_indices])
+        sampled_nodes = torch.unique(sampled_nodes)
+        
+        # Get edges between sampled nodes
+        sampled_adj = adj_matrix[sampled_nodes][:, sampled_nodes]
+        sampled_edges = torch.nonzero(sampled_adj).t()
+        
+        return sampled_nodes, sampled_edges
+    
+    def sample_batch(self, graph, anchor_nodes_list: List[torch.Tensor]) -> List[Tuple[torch.Tensor, torch.Tensor]]:
+        """
+        Sample subgraphs for a batch of anchor nodes
+        
+        Args:
+            graph: Input graph
+            anchor_nodes_list: List of anchor node indices for each sample
+            
+        Returns:
+            List of (sampled node indices, sampled edge indices) for each sample
+        """
+        return [self.sample_subgraph(graph, anchor_nodes) for anchor_nodes in anchor_nodes_list]
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='')

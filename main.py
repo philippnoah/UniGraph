@@ -3,10 +3,12 @@ import torch
 import logging
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
-from transformers import AutoModel, get_scheduler
+from transformers import AutoModel, get_scheduler, AutoTokenizer
 from tqdm.auto import tqdm
 import wandb
 import dgl
+import argparse
+import numpy as np
 
 from data import *
 from model import UniGraph
@@ -14,6 +16,47 @@ from utils.functions import create_optimizer, get_current_lr, set_random_seed, d
 from utils.evaluation import node_classification_evaluation, link_prediction_evaluation, edge_classification_evaluation, graph_classification_evaluation, incontext_evaluate
 from utils.data_util import preprocess
 from gensim.models import KeyedVectors
+from ppr import PPRSampler
+from instruction_tuning import GraphInstructionTuning
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    # Model parameters
+    parser.add_argument("--lm_type", type=str, default="microsoft/deberta-base")
+    parser.add_argument("--hidden_size", type=int, default=768)
+    parser.add_argument("--num_layers", type=int, default=2)
+    parser.add_argument("--nhead", type=int, default=8)
+    parser.add_argument("--activation", type=str, default="gelu")
+    parser.add_argument("--norm", type=str, default="layernorm")
+    parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument("--negative_slope", type=float, default=0.2)
+    
+    # Training parameters
+    parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--weight_decay", type=float, default=0.01)
+    parser.add_argument("--mask_rate", type=float, default=0.15)
+    parser.add_argument("--lam", type=float, default=0.1)
+    parser.add_argument("--momentum", type=float, default=0.996)
+    parser.add_argument("--delayed_ema_epoch", type=int, default=10)
+    
+    # PPR sampling parameters
+    parser.add_argument("--ppr_alpha", type=float, default=0.15)
+    parser.add_argument("--ppr_top_k", type=int, default=32)
+    
+    # Instruction tuning parameters
+    parser.add_argument("--llm_type", type=str, default="meta-llama/Llama-2-7b")
+    parser.add_argument("--lora_r", type=int, default=8)
+    parser.add_argument("--lora_alpha", type=int, default=16)
+    parser.add_argument("--lora_dropout", type=float, default=0.1)
+    
+    # Other parameters
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--save_dir", type=str, default="checkpoints")
+    
+    return parser.parse_args()
 
 def evaluate(args, model, device, name=""):
     for dataset in args.eval_datasets_name:
@@ -121,97 +164,151 @@ def evaluate_mol(args, model, device, name=""):
             "best_val_acc_gnn": best_val_acc,
         })
 
-def train(self):
-        if args.run_name != "":
-            wandb.init(project="unigraph", entity=args.run_entity, name=args.run_name)
-        else:
-            wandb.init(project="unigraph", entity=args.run_entity)
-        wandb.config.update(args)
-
-        set_random_seed(args.seed)
-
-        tags_data = []
-        datasets = []
-        for i, tag_name in enumerate(args.datasets_name):
-            if tag_name not in ["hiv", 'pcba', 'chemblpre']:
-                tags_data.append(TAG(args, tag_name))
-                datasets.append(IterTAGDataset(tags_data[i], i, batch_size, args.num_roots, args.length))
-            else:
-                tags_data.append(Mol(args, tag_name))
-                datasets.append(IterMolDataset(tags_data[i], i, batch_size))
-                
+def train_pretrain(args, model, train_loader, optimizer, epoch):
+    model.train()
+    total_loss = 0
+    total_latent_loss = 0
+    
+    pbar = tqdm(train_loader, desc=f"Epoch {epoch}")
+    for batch in pbar:
+        optimizer.zero_grad()
         
-        dataset = CombinedDataset(datasets, batch_size=batch_size)
-        dataloader = DataLoader(dataset, batch_size=None)
-        model = UniGraph(args, dataset.mask_token_id)
+        # Get graph embeddings
+        graph_emb = model.get_embeddings(batch)
+        
+        # Sample subgraphs using PPR
+        sampler = PPRSampler(alpha=args.ppr_alpha, top_k=args.ppr_top_k)
+        sampled_nodes, sampled_edges = sampler.sample_subgraph(batch["graph"], graph_emb)
+        
+        # Forward pass
+        loss, latent_loss = model(batch, sampled_nodes, epoch)
+        
+        # Backward pass
+        loss.backward()
+        optimizer.step()
+        
+        # Update statistics
+        total_loss += loss.item()
+        total_latent_loss += latent_loss.item()
+        
+        # Update progress bar
+        pbar.set_postfix({
+            "loss": f"{loss.item():.4f}",
+            "latent_loss": f"{latent_loss.item():.4f}"
+        })
+    
+    return total_loss / len(train_loader), total_latent_loss / len(train_loader)
 
-        optimizer = create_optimizer(args.optimizer, model, lr, args.weight_decay)
-        num_training_steps = num_epochs * len(dataloader)
-        lr_scheduler = get_scheduler(
-            name="linear", optimizer=optimizer, num_warmup_steps=0, num_training_steps=num_training_steps
+def train_instruction_tuning(args, model, instruction_tuner, train_loader, optimizer, epoch):
+    model.eval()
+    instruction_tuner.train()
+    total_loss = 0
+    
+    pbar = tqdm(train_loader, desc=f"Instruction Tuning Epoch {epoch}")
+    for batch in pbar:
+        optimizer.zero_grad()
+        
+        # Get graph embeddings
+        with torch.no_grad():
+            graph_emb = model.get_embeddings(batch)
+        
+        # Instruction tuning step
+        loss, metrics = instruction_tuner.train_step(
+            graph_emb,
+            batch["instruction"],
+            batch["target"],
+            batch["task_type"],
+            batch.get("label_space")
         )
-        model.to(device)
+        
+        # Backward pass
+        loss.backward()
+        optimizer.step()
+        
+        # Update statistics
+        total_loss += loss.item()
+        
+        # Update progress bar
+        pbar.set_postfix({
+            "loss": f"{loss.item():.4f}",
+            "perplexity": f"{metrics['perplexity']:.4f}"
+        })
+    
+    return total_loss / len(train_loader)
 
-        # emb = evaluate(model, "initial")
-        if args.load_checkpoint:
-            if args.checkpoint_path != "":
-                model.load_state_dict(torch.load(args.checkpoint_path))
-            emb = evaluate(model, "initial")
-
-        # training loop
-        latent_loss = torch.tensor(0)
-        progress_bar = tqdm(range(num_training_steps))
-        for epoch in range(num_epochs):
-            count = 0
-            # for batch, batch_nodes in dataloader:
-            for batch, batch_item, idx in dataloader:
-                #print(batch_item)
-                #print(batch)
-                model.train()
-                batch = {k: v.to(device) for k, v in batch.items()}
-                # masked_batch = {k: v.to(device) for k, v in masked_batch.items()}
-                if args.gnn_type == "":
-                    masked_input_ids = batch_item
-                    masked_input_ids = masked_input_ids.to(device)
-                    loss = model(batch, masked_input_ids)
-                else:
-                    if isinstance(batch_item, dgl.DGLGraph):
-                        graph = batch_item
-                    else:
-                        batch_nodes = batch_item
-                        batch_nodes=torch.tensor(batch_nodes,dtype=torch.int64)
-                        #print(idx)
-                        #print(batch_nodes.shape)
-                        #print(batch_nodes)
-                        graph = dgl.node_subgraph(tags_data[idx].graph, batch_nodes)
-                        graph = preprocess(graph)
-
-                    graph = graph.to(device)
-                    drop_g1 = drop_edge(graph, args.drop_edge_rate)
-                    drop_g2 = drop_edge(graph, args.drop_edge_rate)
-                    loss, latent_loss = model(batch, graph, epoch=epoch, drop_g1=drop_g1, drop_g2=drop_g2)
-                loss.backward()
-                optimizer.step()
-                # lr_scheduler.step()
-                optimizer.zero_grad()
-                progress_bar.update(1)
-
-                wandb.log({
-                    "current_lr": get_current_lr(optimizer),
-                    "pretrain_loss": loss.item(),
-                    "latent_loss": latent_loss.item(),
-                    'num_edges': graph.number_of_edges(),
-                    'num_nodes': graph.number_of_nodes(),
-                })
-                progress_bar.set_description(f"# Epoch {epoch}, train_loss: {loss.item():.8f}")
-                count += 1
-                if count % args.eval_steps == 0:
-                    emb = evaluate(model, f"{epoch}_{count}")
-                    torch.save(model.state_dict(), f"./checkpoints/{wandb.run.name}_step_{epoch}_{count}.pt")
-        emb = evaluate(model, f"final")
-        torch.save(model.state_dict(), f"./checkpoints/{wandb.run.name}_step_final.pt")
-
+def main():
+    args = parse_args()
+    set_random_seed(args.seed)
+    
+    # Create save directory
+    os.makedirs(args.save_dir, exist_ok=True)
+    
+    # Load tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(args.lm_type)
+    mask_token_id = tokenizer.mask_token_id
+    
+    # Load dataset
+    train_dataset = TextAttributedGraphDataset("train")
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=4
+    )
+    
+    # Initialize model
+    model = UniGraph(args).to(args.device)
+    
+    # Initialize instruction tuner
+    instruction_tuner = GraphInstructionTuning(
+        base_model_name=args.llm_type,
+        graph_embedding_dim=args.hidden_size,
+        lora_r=args.lora_r,
+        lora_alpha=args.lora_alpha,
+        lora_dropout=args.lora_dropout
+    ).to(args.device)
+    
+    # Initialize optimizers
+    pretrain_optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=args.lr,
+        weight_decay=args.weight_decay
+    )
+    
+    instruction_optimizer = torch.optim.AdamW(
+        instruction_tuner.parameters(),
+        lr=args.lr,
+        weight_decay=args.weight_decay
+    )
+    
+    # Training loop
+    for epoch in range(args.epochs):
+        # Pre-training phase
+        pretrain_loss, pretrain_latent_loss = train_pretrain(
+            args, model, train_loader, pretrain_optimizer, epoch
+        )
+        
+        # Instruction tuning phase
+        instruction_loss = train_instruction_tuning(
+            args, model, instruction_tuner, train_loader, instruction_optimizer, epoch
+        )
+        
+        # Save checkpoints
+        if (epoch + 1) % 10 == 0:
+            torch.save({
+                "epoch": epoch,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": pretrain_optimizer.state_dict(),
+                "pretrain_loss": pretrain_loss,
+                "pretrain_latent_loss": pretrain_latent_loss
+            }, os.path.join(args.save_dir, f"pretrain_epoch_{epoch+1}.pt"))
+            
+            torch.save({
+                "epoch": epoch,
+                "model_state_dict": instruction_tuner.state_dict(),
+                "optimizer_state_dict": instruction_optimizer.state_dict(),
+                "instruction_loss": instruction_loss
+            }, os.path.join(args.save_dir, f"instruction_epoch_{epoch+1}.pt"))
 
 if __name__ == "__main__":
-    args = build_args()
-    train(args)
+    main()
