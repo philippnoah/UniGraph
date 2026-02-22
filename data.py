@@ -45,6 +45,7 @@ def get_ego_subgraphs(name):
     elif name == "papers100M":
         ego_graphs = torch.load("./subgraphs/ogbn-papers100M-lc-ego-graphs-256.pt")
         return ego_graphs[0] + ego_graphs[1] + ego_graphs[2]
+    return None
     
 class TAG():
     def __init__(self, args, tag_name) -> None:
@@ -121,8 +122,11 @@ class IterTAGDataset(torch.utils.data.IterableDataset):  # Iterable style
         tokenizer = AutoTokenizer.from_pretrained(self.data.lm_type)
         self.mask_token_id = tokenizer(tokenizer.mask_token)['input_ids'][1]
 
-        #self.loader = get_saint_subgraphs(self.data.graph, self.data.data_info["ogb_name"], num_roots=num_roots, length=length)
         self.loader = get_ego_subgraphs(self.data.name)
+        if self.loader is None:
+            self.loader = get_saint_subgraphs(
+                self.data.graph, self.data.data_info["ogb_name"], num_roots=num_roots, length=length
+            )
         #print(len(self.loader))
         #print(self.loader[0])
         # print(self.loader)

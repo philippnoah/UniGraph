@@ -23,17 +23,25 @@ UniGraph consists of three main components:
 
 ## Requirements
 
-- Python 3.8+
-- PyTorch 1.9+
-- DGL 0.7+
-- Transformers 4.15+
-- NumPy
-- SciPy
-- scikit-learn
+- Python 3.11 recommended (Apple Silicon tested)
+- PyTorch 2.3.0
+- DGL 2.2.0
+- Transformers
+- NumPy / SciPy / scikit-learn
 
-Install dependencies:
+### Quick Setup (macOS Apple Silicon)
+
 ```bash
-pip install -r requirements.txt
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -r requirements-macos-arm64.txt
+```
+
+Optional (only needed for PyG sparse preprocessing path in `utils/preprocess.py`):
+
+```bash
+pip install torch-sparse
 ```
 
 ## Data Format
@@ -129,5 +137,3 @@ If you use this code in your research, please cite:
 ## License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
-
-

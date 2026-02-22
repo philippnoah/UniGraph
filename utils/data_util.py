@@ -18,7 +18,10 @@ from dgl.dataloading import GraphDataLoader
 from dgl.data import load_graphs, save_graphs
 
 from sklearn.preprocessing import StandardScaler
-from data_tg import TextualGraphDataset
+try:
+    from data_tg import TextualGraphDataset
+except ImportError:
+    TextualGraphDataset = None
 
 GRAPH_DICT = {
     "cora": CoraGraphDataset,
@@ -27,8 +30,9 @@ GRAPH_DICT = {
     "ogbn-arxiv": DglNodePropPredDataset,
     "ogbn-products": DglNodePropPredDataset,
     "ogbn-papers100M": DglNodePropPredDataset,
-    "cora_ml":TextualGraphDataset,
 }
+if TextualGraphDataset is not None:
+    GRAPH_DICT["cora_ml"] = TextualGraphDataset
 
 
 def preprocess(graph):

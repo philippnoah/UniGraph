@@ -1,0 +1,26 @@
+name: unigraph-m3
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - numpy
+  - scipy
+  - scikit-learn
+  - pandas
+  - pyyaml
+  - tqdm
+  - networkx
+  - numba
+  - pip:
+      - torch==2.3.0
+      - torchvision==0.18.0
+      - torchaudio==2.3.0
+      - torchdata==0.8.0
+      - dgl==2.2.0
+      - ogb
+      - torch_geometric
+      - transformers
+      - sentencepiece
+      - peft
+      - wandb

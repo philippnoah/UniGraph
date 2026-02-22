@@ -86,10 +86,22 @@ class SAINTSampler:
         assert self.num_subg_sampler >= self.batch_size_sampler, "num_subg_sampler should be greater than batch_size_sampler"
         graph_fn, norm_fn = self.__generate_fn__()
 
+        cache_loaded = False
         if os.path.exists(graph_fn):
-            self.subgraphs = np.load(graph_fn, allow_pickle=True)
+            try:
+                cached_subgraphs = np.load(graph_fn, allow_pickle=True)
+                # Preserve historical behavior: iterate over Python list of node-id arrays.
+                if isinstance(cached_subgraphs, np.ndarray):
+                    self.subgraphs = cached_subgraphs.tolist()
+                else:
+                    self.subgraphs = list(cached_subgraphs)
+                cache_loaded = True
+            except (ValueError, EOFError, OSError):
+                print(f"Invalid subgraph cache at {graph_fn}; regenerating.")
+                self.subgraphs = []
             # aggr_norm, loss_norm = np.load(norm_fn, allow_pickle=True)
-        else:
+
+        if not cache_loaded:
             os.makedirs('./subgraphs/', exist_ok=True)
 
             self.subgraphs = []
@@ -124,7 +136,7 @@ class SAINTSampler:
 
             print(f'Sampling time: [{time.perf_counter() - t:.2f}s]')
 
-            np.save(graph_fn, self.subgraphs)
+            np.save(graph_fn, np.array(self.subgraphs, dtype=object), allow_pickle=True)
 
             # t = time.perf_counter()
             # aggr_norm, loss_norm = self.__compute_norm__()

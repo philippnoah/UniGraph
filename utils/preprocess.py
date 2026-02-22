@@ -15,9 +15,13 @@ from settings import *
 from utils.functions import sample_nodes, init_path
 from tqdm import tqdm
 from copy import deepcopy
-from torch_sparse import SparseTensor
 from torch_geometric.utils import to_undirected, dropout_adj
 from types import SimpleNamespace as SN
+
+try:
+    from torch_sparse import SparseTensor
+except ImportError:
+    SparseTensor = None
 
 
 def _subset_graph(g, subset_ratio, dataset_name, sup):
@@ -115,6 +119,11 @@ def process_graph_structure(g, cf):
 
 
 def process_pyg_graph_structure(data, cf):
+    if SparseTensor is None:
+        raise ImportError(
+            "torch_sparse is required for process_pyg_graph_structure. "
+            "Install torch-sparse for your PyTorch version if you use the PyG preprocessing path."
+        )
     path = '../adj_gcn.pt'
     a = time.time()
     if osp.exists(path):
