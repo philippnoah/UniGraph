@@ -19,7 +19,7 @@ CUDA_VISIBLE_DEVICES=0 python main.py \
   --gnn_type gat \
   --lp_epochs 10 \
   --eval_steps 1 \
-  --eval_interval 100 \
+  --eval_interval 10000 \
   --save_steps 1 \
   --hidden_size 128 \
   --lm_type prajjwal1/bert-tiny \
