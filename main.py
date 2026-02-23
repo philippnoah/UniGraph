@@ -39,7 +39,8 @@ def evaluate_tag(args, model, device, name=""):
 
     for batch, _ in tqdm(eval_loader):
         batch = {k: v.to(device) for k, v in batch.items()}
-        emb = model.get_embeddings(batch)
+        with torch.no_grad():
+            emb = model.get_embeddings(batch)
         output.append(emb.cpu())
     output = torch.cat(output, 0)
 
@@ -65,7 +66,8 @@ def evaluate_tag(args, model, device, name=""):
 
         if args.gnn_type != "":
             graph.ndata["feat"] = output
-            output, cat_output = model.inference(graph, device, args.eval_batch_size)
+            with torch.no_grad():
+                output, cat_output = model.inference(graph, device, args.eval_batch_size)
             test_acc, estp_test_acc, best_val_acc = node_classification_evaluation(
                 graph, output, eval_tag.labels, eval_tag.split_idx,
                 eval_tag.data_info["n_labels"], args.lr_f, args.weight_decay_f,
@@ -95,7 +97,8 @@ def evaluate_tag(args, model, device, name=""):
         })
         if args.gnn_type != "":
             graph.ndata["feat"] = output
-            output, cat_output = model.inference(graph, device, args.eval_batch_size)
+            with torch.no_grad():
+                output, cat_output = model.inference(graph, device, args.eval_batch_size)
             test_acc, estp_test_acc, best_val_acc = edge_classification_evaluation(
                 graph, output, node_pairs, labels, eval_tag.split_idx,
                 eval_tag.data_info["n_labels"], args.lr_f, args.weight_decay_f,
@@ -153,7 +156,7 @@ def evaluate_mol(args, model, device, name=""):
     })
 
 
-def train_pretrain(args, model, train_loader, tag_datasets, optimizer, epoch, device, global_step):
+def train_pretrain(args, model, train_loader, tag_datasets, optimizer, epoch, device, global_step, eval_fn=None):
     model.train()
     total_loss = 0
     total_latent_loss = 0
@@ -184,6 +187,11 @@ def train_pretrain(args, model, train_loader, tag_datasets, optimizer, epoch, de
             "epoch": epoch,
         }, step=global_step)
         global_step += 1
+
+        if eval_fn is not None and args.eval_interval > 0 and global_step % args.eval_interval == 0:
+            model.eval()
+            eval_fn()
+            model.train()
 
         pbar.set_postfix({
             "loss": f"{loss.item():.4f}",
@@ -265,8 +273,9 @@ def main():
     # Pre-training loop
     global_step = 0
     for epoch in range(args.num_epochs):
+        eval_fn = (lambda: evaluate(args, model, device)) if args.eval_interval > 0 else None
         pretrain_loss, pretrain_latent_loss, global_step = train_pretrain(
-            args, model, train_loader, tag_datasets, pretrain_optimizer, epoch, device, global_step
+            args, model, train_loader, tag_datasets, pretrain_optimizer, epoch, device, global_step, eval_fn=eval_fn
         )
         logging.info(
             f"Epoch {epoch}: loss={pretrain_loss:.4f}, latent_loss={pretrain_latent_loss:.4f}"
@@ -280,7 +289,7 @@ def main():
         if (epoch + 1) % args.eval_steps == 0 or epoch == args.num_epochs - 1:
             evaluate(args, model, device)
 
-        if (epoch + 1) % 10 == 0:
+        if (epoch + 1) % args.save_steps == 0 or epoch == args.num_epochs - 1:
             torch.save({
                 "epoch": epoch,
                 "model_state_dict": model.state_dict(),
