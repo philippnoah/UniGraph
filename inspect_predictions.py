@@ -125,7 +125,7 @@ def main():
     print("Loading model...")
     model = UniGraph(args).to(device)
     ckpt = torch.load(args.checkpoint, map_location=device)
-    model.load_state_dict(ckpt["model_state_dict"])
+    model.load_state_dict(ckpt["model_state_dict"], strict=False)
     model.eval()
 
     # ── get embeddings ────────────────────────────────────────────────────────
