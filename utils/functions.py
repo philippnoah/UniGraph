@@ -124,6 +124,7 @@ def build_args():
     parser.add_argument("--load_checkpoint", action="store_true", default=False)
     parser.add_argument("--checkpoint_path", type=str, default="")
     parser.add_argument("--save_steps", type=int, default=10, help="save checkpoint every N epochs")
+    parser.add_argument("--save_interval", type=int, default=0, help="save checkpoint every N global steps (0 = disabled)")
     parser.add_argument("--eval_interval", type=int, default=0, help="evaluate every N global steps (0 = disabled)")
     args = parser.parse_args()
     return args

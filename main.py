@@ -156,7 +156,7 @@ def evaluate_mol(args, model, device, name=""):
     })
 
 
-def train_pretrain(args, model, train_loader, tag_datasets, optimizer, epoch, device, global_step, eval_fn=None):
+def train_pretrain(args, model, train_loader, tag_datasets, optimizer, epoch, device, global_step, eval_fn=None, save_dir=None):
     model.train()
     total_loss = 0
     total_latent_loss = 0
@@ -192,6 +192,15 @@ def train_pretrain(args, model, train_loader, tag_datasets, optimizer, epoch, de
             model.eval()
             eval_fn()
             model.train()
+
+        if save_dir is not None and args.save_interval > 0 and global_step % args.save_interval == 0:
+            torch.save({
+                "epoch": epoch,
+                "global_step": global_step,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "pretrain_loss": loss.item(),
+            }, os.path.join(save_dir, f"pretrain_step_{global_step}.pt"))
 
         pbar.set_postfix({
             "loss": f"{loss.item():.4f}",
@@ -275,7 +284,7 @@ def main():
     for epoch in range(args.num_epochs):
         eval_fn = (lambda: evaluate(args, model, device)) if args.eval_interval > 0 else None
         pretrain_loss, pretrain_latent_loss, global_step = train_pretrain(
-            args, model, train_loader, tag_datasets, pretrain_optimizer, epoch, device, global_step, eval_fn=eval_fn
+            args, model, train_loader, tag_datasets, pretrain_optimizer, epoch, device, global_step, eval_fn=eval_fn, save_dir=save_dir
         )
         logging.info(
             f"Epoch {epoch}: loss={pretrain_loss:.4f}, latent_loss={pretrain_latent_loss:.4f}"
